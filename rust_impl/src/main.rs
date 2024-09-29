@@ -1,3 +1,5 @@
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 use zookeeper::{Acl, CreateMode, WatchedEvent, Watcher, ZooKeeper};
@@ -8,21 +10,27 @@ impl Watcher for DefaultWatcher {
 }
 
 fn main() {
-    ephemeral_test();
+    //ephemeral_test();
+    //println!("Sleeping...");
+    //thread::sleep(Duration::from_secs(10));
+    ephemeral_sequential_test();
 }
 
-fn ephemeral_test() {
+fn ephemeral_sequential_test() {
     let duration = Duration::new(10, 0);
     let start_time = Instant::now();
 
-    let zk = ZooKeeper::connect("127.0.0.1:2181", Duration::from_secs(10), DefaultWatcher).unwrap();
+    let zk = Arc::new(
+        ZooKeeper::connect("127.0.0.1:2181", Duration::from_secs(10), DefaultWatcher)
+            .expect("Failed to connect to ZooKeeper"),
+    );
 
     let mut handles = Vec::new();
     const BENCHMARK_PATH: &str = "/benchmark";
 
-    // delete old benchmark node if it exists
-    if let Ok(prev_benchmark_node) = zk.exists(BENCHMARK_PATH, false) {
-        zk.delete(BENCHMARK_PATH, Some(prev_benchmark_node.unwrap().version))
+    // Delete old benchmark node if it exists
+    if let Ok(Some(prev_benchmark_node)) = zk.exists(BENCHMARK_PATH, false) {
+        zk.delete(BENCHMARK_PATH, Some(prev_benchmark_node.version))
             .expect("Failed to delete old benchmark node");
     }
 
@@ -32,41 +40,100 @@ fn ephemeral_test() {
         Acl::open_unsafe().clone(),
         CreateMode::Persistent,
     )
-    .expect("failed to create parent dir");
+    .expect("Failed to create parent dir");
 
-    // store connections in a vec (or else all ephemeral nodes get deleted when threads finish up)
-    let mut zookeeper_connections = Vec::new();
-    for _ in 0..50 {
+    for _ in 0..1000 {
+        let zk_clone = Arc::clone(&zk);
         let start_time_clone = start_time;
 
-        // spawn the 50 threads
         let handle = thread::spawn(move || {
-            let zk = ZooKeeper::connect("127.0.0.1:2181", Duration::from_secs(10), DefaultWatcher)
-                .unwrap();
-
-            // create znodes in a loop for each thread
             while start_time_clone.elapsed() < duration {
-                // create an ephemeral sequential znode
-                zk.create(
-                    format!("{}/node_", BENCHMARK_PATH).as_str(),
-                    vec![],
-                    Acl::open_unsafe().clone(),
-                    CreateMode::EphemeralSequential,
-                )
-                .expect("Error creating znode");
+                // Create an ephemeral sequential znode
+                zk_clone
+                    .create(
+                        &format!("{}/node_", BENCHMARK_PATH),
+                        vec![],
+                        Acl::open_unsafe().clone(),
+                        CreateMode::EphemeralSequential,
+                    )
+                    .expect("Error creating znode");
             }
-            zk
         });
         handles.push(handle);
     }
 
-    // wait for all threads to complete
+    // Wait for all threads to complete
     for handle in handles {
-        let zk_connection = handle.join().unwrap();
-        zookeeper_connections.push(zk_connection);
+        handle.join().unwrap();
     }
 
-    // get number of children and print them
+    // Get number of children and print them
+    let num_children = zk.get_children(BENCHMARK_PATH, false).unwrap().len();
+    println!("Total znodes added: {}", num_children);
+    println!(
+        "Operations per second: {:.2}",
+        num_children as f64 / duration.as_secs_f64()
+    );
+    // Close the ZooKeeper connection
+    zk.close().unwrap();
+}
+
+fn ephemeral_test() {
+    let duration = Duration::new(10, 0);
+    let start_time = Instant::now();
+
+    let zk = Arc::new(
+        ZooKeeper::connect("127.0.0.1:2181", Duration::from_secs(10), DefaultWatcher)
+            .expect("Failed to connect to ZooKeeper"),
+    );
+
+    let mut handles = Vec::new();
+    const BENCHMARK_PATH: &str = "/benchmark";
+
+    // Delete old benchmark node if it exists
+    if let Ok(Some(prev_benchmark_node)) = zk.exists(BENCHMARK_PATH, false) {
+        zk.delete(BENCHMARK_PATH, Some(prev_benchmark_node.version))
+            .expect("Failed to delete old benchmark node");
+    }
+
+    zk.create(
+        BENCHMARK_PATH,
+        vec![],
+        Acl::open_unsafe().clone(),
+        CreateMode::Persistent,
+    )
+    .expect("Failed to create parent dir");
+
+    let counter = Arc::new(AtomicUsize::new(0));
+
+    for _ in 0..1000 {
+        let zk_clone = Arc::clone(&zk);
+        let start_time_clone = start_time;
+        let counter_clone = Arc::clone(&counter);
+
+        let handle = thread::spawn(move || {
+            while start_time_clone.elapsed() < duration {
+                let node_id = counter_clone.fetch_add(1, Ordering::Relaxed);
+                // Create an ephemeral sequential znode
+                zk_clone
+                    .create(
+                        &format!("{}/node_{}", BENCHMARK_PATH, node_id),
+                        vec![],
+                        Acl::open_unsafe().clone(),
+                        CreateMode::Ephemeral,
+                    )
+                    .expect("Error creating znode");
+            }
+        });
+        handles.push(handle);
+    }
+
+    // Wait for all threads to complete
+    for handle in handles {
+        handle.join().unwrap();
+    }
+
+    // Get number of children and print them
     let num_children = zk.get_children(BENCHMARK_PATH, false).unwrap().len();
     println!("Total znodes added: {}", num_children);
     println!(

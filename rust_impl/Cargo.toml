@@ -6,3 +6,4 @@ edition = "2021"
 [dependencies]
 zookeeper = "0.7"
 tokio = { version = "1", features = ["full"] }
+rusty_pool = "0.7.0"
