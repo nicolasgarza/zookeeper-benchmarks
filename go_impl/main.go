@@ -9,66 +9,80 @@ import (
 	"github.com/go-zookeeper/zk"
 )
 
+const (
+	benchmarkPath = "/benchmark"
+	numTasks      = 1000
+	batchSize     = 100
+)
+
 func main() {
-	add_and_delete()
-	time.Sleep(time.Second)
+	ephemeralSequentialTest()
 }
 
-func add_and_delete() {
-	conn, _, err := zk.Connect([]string{"127.0.0.1:2181"}, 60*time.Second)
+func ephemeralSequentialTest() {
+	duration := 10 * time.Second
+	startTime := time.Now()
+
+	// Connect to ZooKeeper
+	zkClient, _, err := zk.Connect([]string{"127.0.0.1:2181"}, time.Second)
 	if err != nil {
-		log.Fatalf("Unable to connect to Zookeeper: %v", err)
+		log.Fatalf("Failed to connect to ZooKeeper: %v", err)
 	}
-	defer conn.Close()
+	defer zkClient.Close()
 
-	rootPath := "/benchmark"
-	if exists, _, err := conn.Exists(rootPath); !exists && err == nil {
-		_, err = conn.Create(rootPath, []byte{}, 0, zk.WorldACL(zk.PermAll))
-		if err != nil {
-			log.Fatalf("Unable to create root znode: %v", err)
+	// Check and delete the old benchmark node if it exists
+	exists, stat, err := zkClient.Exists(benchmarkPath)
+	if err != nil {
+		log.Fatalf("Error checking if node exists: %v", err)
+	}
+	if exists {
+		if err := zkClient.Delete(benchmarkPath, stat.Version); err != nil {
+			log.Printf("Failed to delete old benchmark node: %v", err)
 		}
 	}
 
-	// create a done channel
-	done := make(chan struct{})
-
-	znodeUpdater := func() {
-		for {
-			select {
-			// check if we've received a stop signal
-			case <-done:
-				return // exit the goroutine
-			default:
-				// create a sequential znode
-				conn.CreateProtectedEphemeralSequential(rootPath+"/node_", []byte{}, zk.WorldACL(zk.PermAll))
-				if err != nil {
-					log.Printf("Failed to create znode: %v", err)
-					return
-				}
-			}
-		}
+	// Create the benchmark node
+	_, err = zkClient.Create(benchmarkPath, []byte{}, zk.FlagPersistent, zk.WorldACL(zk.PermAll))
+	if err != nil && err != zk.ErrNodeExists {
+		log.Fatalf("Failed to create benchmark node: %v", err)
 	}
 
 	var wg sync.WaitGroup
-	for i := 0; i < 10; i++ {
+
+	for i := 0; i < numTasks; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			znodeUpdater()
+			for time.Since(startTime) < duration {
+				ops := make([]interface{}, 0, batchSize)
+				for j := 0; j < batchSize; j++ {
+					path := fmt.Sprintf("%s/node_", benchmarkPath)
+					ops = append(ops, &zk.CreateRequest{
+						Path:  path,
+						Data:  []byte{},
+						Acl:   zk.WorldACL(zk.PermAll),
+						Flags: zk.FlagEphemeralSequential,
+					})
+				}
+
+				_, err := zkClient.Multi(ops...)
+				if err != nil {
+					log.Printf("Error running multi request: %v", err)
+				}
+			}
 		}()
 	}
 
-	time.Sleep(60 * time.Second)
-
-	fmt.Println("Stopping goroutines...")
-
-	close(done)
-
+	// Wait for all tasks to complete
 	wg.Wait()
 
-	children, _, err := conn.Children(rootPath)
+	// Get the number of children
+	children, _, err := zkClient.Children(benchmarkPath)
 	if err != nil {
-		log.Fatalf("Unable to get children of root znode: %v", err)
+		log.Fatalf("Failed to get children: %v", err)
 	}
-	fmt.Printf("Number of znodes in %s: %d\n", rootPath, len(children))
+
+	numChildren := len(children)
+	fmt.Printf("Total znodes added: %d\n", numChildren)
+	fmt.Printf("Operations per second: %.2f\n", float64(numChildren)/duration.Seconds())
 }

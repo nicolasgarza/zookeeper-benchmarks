@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::thread;
@@ -10,10 +11,9 @@ impl Watcher for DefaultWatcher {
 }
 
 fn main() {
-    //ephemeral_test();
-    //println!("Sleeping...");
-    //thread::sleep(Duration::from_secs(10));
     ephemeral_sequential_test();
+    //ephemeral_test();
+    //check_threads_running();
 }
 
 fn ephemeral_sequential_test() {
@@ -28,21 +28,18 @@ fn ephemeral_sequential_test() {
     let mut handles = Vec::new();
     const BENCHMARK_PATH: &str = "/benchmark";
 
-    // Delete old benchmark node if it exists
-    if let Ok(Some(prev_benchmark_node)) = zk.exists(BENCHMARK_PATH, false) {
-        zk.delete(BENCHMARK_PATH, Some(prev_benchmark_node.version))
-            .expect("Failed to delete old benchmark node");
+    // create benchmark node if it doesn't exist
+    if zk.exists(BENCHMARK_PATH, false).unwrap().is_none() {
+        zk.create(
+            BENCHMARK_PATH,
+            vec![],
+            Acl::open_unsafe().clone(),
+            CreateMode::Persistent,
+        )
+        .expect("Failed to create parent dir");
     }
 
-    zk.create(
-        BENCHMARK_PATH,
-        vec![],
-        Acl::open_unsafe().clone(),
-        CreateMode::Persistent,
-    )
-    .expect("Failed to create parent dir");
-
-    for _ in 0..1000 {
+    for _ in 0..1500 {
         let zk_clone = Arc::clone(&zk);
         let start_time_clone = start_time;
 
@@ -54,7 +51,7 @@ fn ephemeral_sequential_test() {
                         &format!("{}/node_", BENCHMARK_PATH),
                         vec![],
                         Acl::open_unsafe().clone(),
-                        CreateMode::EphemeralSequential,
+                        CreateMode::PersistentSequential,
                     )
                     .expect("Error creating znode");
             }
@@ -67,6 +64,7 @@ fn ephemeral_sequential_test() {
         handle.join().unwrap();
     }
 
+    thread::sleep(Duration::from_secs(1));
     // Get number of children and print them
     let num_children = zk.get_children(BENCHMARK_PATH, false).unwrap().len();
     println!("Total znodes added: {}", num_children);
@@ -74,8 +72,6 @@ fn ephemeral_sequential_test() {
         "Operations per second: {:.2}",
         num_children as f64 / duration.as_secs_f64()
     );
-    // Close the ZooKeeper connection
-    zk.close().unwrap();
 }
 
 fn ephemeral_test() {
@@ -142,4 +138,20 @@ fn ephemeral_test() {
     );
     // Close the ZooKeeper connection
     zk.close().unwrap();
+}
+
+fn check_threads_running() {
+    let mut handles = vec![];
+
+    for i in 0..10000 {
+        let handle = thread::spawn(move || {
+            let thread_id = thread::current().id();
+            println!("Thread {} is running with ID {:?}", i, thread_id);
+        });
+        handles.push(handle);
+    }
+
+    for handle in handles {
+        handle.join().unwrap();
+    }
 }
